@@ -1,0 +1,10 @@
+torch
+torchmetrics
+torchinfo
+numpy
+scipy
+matplotlib
+LDAQ
+nidaqmx
+ipykernel
+jupyter 
