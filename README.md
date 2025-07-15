@@ -67,12 +67,12 @@ If you use this project or its code in your academic work, please cite it as fol
 Or in BibTeX format:
 
 ```bibtex
-@mastersthesis{podlipnik2025impact,
-  author       = {Enej Podlipnik},
-  title        = {Impact Location and Force Prediction},
-  year         = {2025},
-  school       = {University of Ljubljana, Faculty of Mechanical Engineering},
-  note         = {Undergraduate Diploma Thesis},
+@misc{podlipnik2025impact,
+  author = {Enej Podlipnik},
+  title = {Določanje lokacije in sile udarca na plošči z uporabo nevronskih mrež - Impact Location and Force Prediction},
+  year = {2025},
+  publisher = {GitHub},
+  journal = {GitHub repository},
   howpublished = {\url{https://github.com/podlen/Diploma_SourceCode.git}}
 }
 ```
