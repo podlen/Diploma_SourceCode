@@ -1072,11 +1072,12 @@ def prediction_heatmap(
     model: torch.nn.Module,
     weight_path: str,
     data_dir: str,
+    force_class_boundaries: tuple,
     board_size_xy: tuple,
     grid_res: tuple,
     skip_data: int = None,
     trim_duration: float = None,
-    mode: str = "mean_error",      # "mean_error", "hit_rate", or "mean_hit_error"
+    mode: str = "mean_error",      # "mean_error", "hit_rate", "mean_hit_error", "force_accuracy", "location_accuracy", "force_error"
     tol: float = 2.0,
     device: torch.device = None,
     verbose: bool = True
@@ -1088,14 +1089,18 @@ def prediction_heatmap(
         model (nn.Module): model to test (must have preloaded weights).
         weight_path (str): path to model weights.
         data_dir (str): directory with .pkl measurement files.
+        force_class_boundaries (tuple): boundaries for force classes. Tuple of length 2. 
         board_size_xy (tuple): (width, height) of the board in same units as labels.
         grid_res (tuple): (nx, ny) grid resolution.
         skip_data (int): down‑sampling factor.
         trim_duration (float): truncate each trial to this duration (sec).
         mode (str): one of:
-            - "mean_error"      : mean Euclidean error of all samples
-            - "hit_rate"        : fraction of samples with error < tol
-            - "mean_hit_error"  : mean error of only the “hits” (error < tol)
+            - "mean_error"        : mean Euclidean error of all samples (location only)
+            - "hit_rate"          : fraction of samples with error < tol (location only)
+            - "mean_hit_error"    : mean error of only the "hits" (error < tol, location only)
+            - "force_accuracy"    : force classification accuracy (or regression within tolerance)
+            - "location_accuracy" : location classification/regression accuracy
+            - "force_error"       : mean absolute error for force regression
         tol (float): tolerance threshold (same units as board_size_xy).
         device (torch.device): inference device. Auto‑detect if None.
         verbose (bool): print progress per file.
@@ -1111,6 +1116,7 @@ def prediction_heatmap(
 
     board_w, board_h = board_size_xy
     nx, ny       = grid_res
+    b1, b2 = force_class_boundaries
 
     # where to bin along X,Y
     x_edges = np.linspace(0, board_w, nx + 1)
@@ -1119,6 +1125,9 @@ def prediction_heatmap(
     # collect errors & hits per true‑cell
     err_lists = [[[] for _ in range(nx)] for _ in range(ny)]
     hit_lists = [[[] for _ in range(nx)] for _ in range(ny)]
+    force_correct_lists = [[[] for _ in range(nx)] for _ in range(ny)]
+    force_error_lists = [[[] for _ in range(nx)] for _ in range(ny)]
+    loc_correct_lists = [[[] for _ in range(nx)] for _ in range(ny)]
 
     pkl_paths = sorted(Path(data_dir).glob("*.pkl"))
     if not pkl_paths:
@@ -1137,6 +1146,11 @@ def prediction_heatmap(
             print(f"({idx}/{len(pkl_paths)}) {pkl_path.name}")
         d = open_pkl_dict(pkl_path)
         true_loc = np.array(d['label_loc'], dtype=float)
+        
+        # Get force label if available
+        true_force = d.get('label_force', None)
+        # Also get hammer max force if available
+        hammer_max_force = d.get('hammer_max_force', None)
 
         # find true‑cell indices
         ix = np.clip(np.digitize(true_loc[0], x_edges) - 1, 0, nx-1)
@@ -1152,33 +1166,74 @@ def prediction_heatmap(
             x_t = x_t.unsqueeze(0)  # shape (1, T, C)
 
             with torch.inference_mode():
-                loc_out, _ = model(x_t)
-            loc_out = loc_out.squeeze().cpu().numpy()
+                model_out = model(x_t)
+                
+                # Handle different model output formats
+                if isinstance(model_out, tuple):
+                    if len(model_out) == 2:
+                        loc_out, force_out = model_out
+                    else:
+                        loc_out = model_out[0]
+                        force_out = model_out[1] if len(model_out) > 1 else None
+                else:
+                    loc_out = model_out
+                    force_out = None
 
-            # compute error + hit
-            if getattr(model, 'loc_class', False):
+            loc_out = loc_out.squeeze().cpu().numpy()
+            if force_out is not None:
+                force_out = force_out.squeeze().cpu().numpy()
+
+            # compute location error + hit
+            if model.loc_class:
                 # classification → compare bins
                 pred_bin = int(np.argmax(loc_out))
                 px, py   = centers[pred_bin]
                 error    = np.linalg.norm([px, py] - true_loc)
                 hit      = (pred_bin == true_bin)
+                loc_correct = (pred_bin == true_bin)
             else:
                 # regression → direct (x,y)
                 pred_xy = loc_out
                 error   = np.linalg.norm(pred_xy - true_loc)
                 hit     = (error < tol)
+                loc_correct = hit
 
             err_lists[iy][ix].append(error)
             hit_lists[iy][ix].append(float(hit))
+            loc_correct_lists[iy][ix].append(float(loc_correct))
+
+            # compute force accuracy if available
+            if force_out is not None and true_force is not None:
+                if model.force_reg:
+                    # Force regression - compare predicted vs true force
+                    pred_force = float(force_out)
+                    force_error = abs(pred_force - true_force)
+                    force_error_lists[iy][ix].append(force_error)
+                    
+                    # Consider it "correct" if within some tolerance (e.g., 10% of true force)
+                    force_tolerance = 0.1 * abs(true_force) if true_force != 0 else 1.0
+                    force_correct = (force_error < force_tolerance)
+                else:
+                    # Force classification - convert continuous force to discrete classes
+                    true_force_class = 0 if hammer_max_force < b1 else 1 if hammer_max_force < b2 else 2
+
+                    
+                    pred_force_class = int(np.argmax(force_out))
+                    force_correct = (pred_force_class == true_force_class)
+                
+                force_correct_lists[iy][ix].append(float(force_correct))
 
     # build the heatmap array
     heat = np.full((ny, nx), np.nan, dtype=float)
-    is_class = getattr(model, 'loc_class', False)
 
     for iy in range(ny):
         for ix in range(nx):
             errs = np.array(err_lists[iy][ix])
             hits = np.array(hit_lists[iy][ix])
+            loc_corrects = np.array(loc_correct_lists[iy][ix])
+            force_corrects = np.array(force_correct_lists[iy][ix])
+            force_errors = np.array(force_error_lists[iy][ix])
+            
             if errs.size == 0:
                 continue
 
@@ -1189,18 +1244,33 @@ def prediction_heatmap(
                 heat[iy, ix] = hits.mean()
 
             elif mode == 'mean_hit_error':
-                if is_class:
-                    # classification: mis-classification rate over 3 classes
+                if model.loc_class:
+                    # classification: mis-classification rate
                     heat[iy, ix] = 1.0 - hits.mean()
                 else:
-                    # regression: mean error of only the “hits”
+                    # regression: mean error of only the "hits"
                     if hits.sum() > 0:
                         heat[iy, ix] = errs[hits.astype(bool)].mean()
                     else:
                         heat[iy, ix] = np.nan
 
+            elif mode == 'force_accuracy':
+                if force_corrects.size > 0:
+                    heat[iy, ix] = force_corrects.mean()
+                else:
+                    heat[iy, ix] = np.nan
+
+            elif mode == 'location_accuracy':
+                heat[iy, ix] = loc_corrects.mean()
+
+            elif mode == 'force_error':
+                if force_errors.size > 0:
+                    heat[iy, ix] = force_errors.mean()
+                else:
+                    heat[iy, ix] = np.nan
+
             else:
-                raise ValueError("mode must be 'mean_error', 'hit_rate' or 'mean_hit_error'")
+                raise ValueError("mode must be 'mean_error', 'hit_rate', 'mean_hit_error', 'force_accuracy', 'location_accuracy', or 'force_error'")
 
     # choose colormap & label
     if mode == 'hit_rate':
@@ -1209,9 +1279,18 @@ def prediction_heatmap(
     elif mode == 'mean_error':
         cmap  = 'magma_r'
         label = 'Mean error'
-    else:  # mean_hit_error
-        cmap  = 'magma_r' if is_class else 'plasma'
-        label = 'Mean error of hits' if not is_class else 'Mis‑classification rate'
+    elif mode == 'mean_hit_error':
+        cmap  = 'magma_r'
+        label = 'Mean error of hits' if not model.loc_class else 'Mis‑classification rate'
+    elif mode == 'force_accuracy':
+        cmap  = 'viridis'
+        label = 'Force accuracy' if not model.force_reg else 'Force accuracy (within tolerance)'
+    elif mode == 'location_accuracy':
+        cmap  = 'viridis'
+        label = 'Location accuracy'
+    elif mode == 'force_error':
+        cmap  = 'magma_r'
+        label = 'Mean force error'
 
     # plot
     plt.figure(figsize=(6,5))
@@ -1227,7 +1306,6 @@ def prediction_heatmap(
     plt.xlabel('X'); plt.ylabel('Y')
     plt.tight_layout()
     plt.show()
-
 
 
 ### DAQ FUNCTIONS 
