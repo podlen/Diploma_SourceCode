@@ -44,8 +44,9 @@ pip install -r requirements.txt
 ## How to Cite
 
 If you use this project or its code in your academic work, please cite it as follows:
-
-> Podlipnik, Enej. "Impact Location and Force Prediction." Undergraduate Diploma Thesis, University of Ljubljana, Faculty of Mechanical Engineering, 2025. https://github.com/podlen/Diploma_SourceCode.git
+```
+Podlipnik, Enej. "Impact Location and Force Prediction." Undergraduate Diploma Thesis, University of Ljubljana, Faculty of Mechanical Engineering, 2025. https://github.com/podlen/Diploma_SourceCode.git
+```
 
 Or in BibTeX format:
 
